@@ -78,6 +78,36 @@ class Critic(Middleware):
 
     name = "critic"
 
+    @staticmethod
+    def _source_ids(ctx, text):
+        if not text or text not in ctx.observed_text or ctx.corpus is None:
+            return []
+        return [
+            doc.doc_id
+            for doc in ctx.corpus.docs
+            if any(text in line for line in doc.body.splitlines())
+        ]
+
+    def _split_claim(self, ctx, claim, text):
+        separator = " và "
+        start = 0
+        while True:
+            split_at = text.find(separator, start)
+            if split_at < 0:
+                return None
+            left = text[:split_at]
+            right = text[split_at + len(separator):]
+            left_ids = self._source_ids(ctx, left)
+            right_ids = self._source_ids(ctx, right)
+            for left_id in left_ids:
+                for right_id in right_ids:
+                    if left_id != right_id:
+                        return [
+                            {**claim, "text": left, "doc_id": left_id},
+                            {**claim, "text": right, "doc_id": right_id},
+                        ]
+            start = split_at + 1
+
     def after_agent(self, ctx, report):
         # TODO (§2): khoảng 10-25 dòng.
         #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
@@ -91,4 +121,34 @@ class Critic(Middleware):
         #     claims = [], citations = [], và viết lại "answer" nói rõ là
         #     không đủ căn cứ.
         #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        kept = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if isinstance(text, str) and text and text in ctx.observed_text:
+                kept.append(claim)
+                continue
+            if isinstance(text, str):
+                split_claims = self._split_claim(ctx, claim, text)
+                if split_claims is not None:
+                    kept.extend(split_claims)
+                    report["abstain"] = True
+
+        report["claims"] = kept
+        report["citations"] = sorted(
+            {
+                claim.get("doc_id")
+                for claim in kept
+                if isinstance(claim.get("doc_id"), str) and claim.get("doc_id")
+            }
+        )
+        if not kept:
+            report["abstain"] = True
+            report["citations"] = []
+            report["answer"] = "Chưa đủ căn cứ từ bằng chứng đã quan sát để trả lời."
+        return report
